@@ -1,0 +1,129 @@
+# ============================================================================
+# 报告 workflow 的自检
+# ============================================================================
+#
+# 这个仓库一度是整套东西里唯一一处「靠人小心」：改 report.yml 会立刻同时改变
+# 两个项目的 CI，而它自己没有任何验证。这个文件就是那个洞。
+#
+# 它验的是**真实行为**，不是配置长什么样：起一个假调用方，让真的 report.yml
+# 跑完整条链路，然后回头去 API 上确认那条评论真的存在。report.yml 自己内部有
+# 「发完读回来」，但那是监控自证清白,这里是从外面看，看的和读评论的人拿到的
+# 是同一份东西。
+#
+# **uses 的是本地路径 `./.github/workflows/report.yml`。** 自检必须验这次改动，
+# 不是验 @main 上那份,否则它永远在给已经发布的版本背书。
+#
+# ---------------------------------------------------------------------------
+# 降级那条用例不在这里
+# ---------------------------------------------------------------------------
+#
+# 它在 `selftest-degraded.yml`，因为那条用例**预期就是红的**,而调用可复用
+# workflow 的 job 不支持 `continue-on-error`（解析器会把它当成普通 job 然后报
+# runs-on 缺失）。一次预期失败的运行只能是它自己的一次运行。
+#
+# ---------------------------------------------------------------------------
+# 一个说清楚的局限
+# ---------------------------------------------------------------------------
+#
+# report.yml 按「这个 commit 上有没有开着的 PR」分岔，所以**一次运行只可能走到
+# 一条路**。验证脚本按同一个事实分岔，断言评论出现在该出现的地方、并且没有出现
+# 在另一边。两条路靠正常的生命周期覆盖：
+#
+#   开 PR 之前推分支 → 没有 PR，走 commit 评论
+#   PR 开着的时候推  → 走 PR 评论
+#   合进 main        → 又是没有 PR，走 commit 评论
+#
+# 所以一条 PR 从头走到合并，两条路都会被真的走一遍。别把单次绿读成两条都验过了,
+# 每次运行的日志里都印着这次走的是哪条。
+
+name: selftest
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+concurrency:
+  group: selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 假闸门。它不验证任何东西,只产出和真调用方同形状的 artifact，好让
+  # report.yml 有真实输入可以处理。
+  fake-gate:
+    name: 假闸门
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 跑假闸门
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          node test/fake-gate.mjs 2>&1 | tee artifacts/stdout-fake.log
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-fake
+          path: artifacts/
+          retention-days: 3
+          if-no-files-found: error
+
+  # 用例 1：完整报告。这一条必须真的通过。
+  report-ok:
+    name: 完整报告
+    needs: [fake-gate]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/report.yml
+    with:
+      node-version: '22'
+      gates: '[{"name":"假闸门","result":"${{ needs.fake-gate.result }}"}]'
+      composer-files: test/compose-report.mjs
+      composer-entry: test/compose-report.mjs
+      marker: '<!-- ci-workflows-selftest:ok:${{ github.run_id }}:${{ github.run_attempt }} -->'
+
+  # 用例 2：同一个 marker 再回写一遍。必须更新那一条，不能再贴一条,刷屏
+  # 也是一种坏掉，而且是那种「看起来还在工作」的坏掉。
+  report-again:
+    name: 再回写一遍
+    needs: [fake-gate, report-ok]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/report.yml
+    with:
+      node-version: '22'
+      gates: '[{"name":"假闸门","result":"${{ needs.fake-gate.result }}"}]'
+      composer-files: test/compose-report.mjs
+      composer-entry: test/compose-report.mjs
+      marker: '<!-- ci-workflows-selftest:ok:${{ github.run_id }}:${{ github.run_attempt }} -->'
+
+  verify-ok:
+    name: 验证完整报告真的送达
+    needs: [report-again]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 回头确认评论存在
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node test/verify-delivery.mjs \
+            --marker '<!-- ci-workflows-selftest:ok:${{ github.run_id }}:${{ github.run_attempt }} -->' \
+            --expect-one
