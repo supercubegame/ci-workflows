@@ -1,0 +1,91 @@
+# ============================================================================
+# 降级用例（**这次运行预期就是红的**）
+# ============================================================================
+#
+# 看到它红，别去修。红是这条用例的结论。
+#
+# 它把 composer 指向一个不存在的文件，于是 report.yml 取不到、合成不了，只能
+# 发那份兜底评论,然后按设计让自己变红。要验的正是这个：
+#
+#   1. 评论仍然送达（没送达才是最坏的情况：静默）
+#   2. 评论自称降级，不会读起来像一份完整报告
+#   3. 评论里带着闸门 stdout 的尾巴（「没有产出报告」要说明为什么）
+#   4. 相关步骤真的是 failure
+#
+# 这四条由 `selftest.yml` 里的验证 job 断言,它把这个 workflow dispatch 起来，
+# 等它跑完，然后从 API 上查结论和评论。所以这里只负责「真的按那样失败一次」。
+#
+# ---------------------------------------------------------------------------
+# 为什么它必须是独立的一次运行
+# ---------------------------------------------------------------------------
+#
+# 因为调用可复用 workflow 的 job **不支持 `continue-on-error`**,加上去解析器
+# 会把它当成普通 job，然后报 `runs-on` 缺失。所以没有办法让一个预期失败的
+# reusable-workflow 调用待在一条整体为绿的运行里。
+#
+# 而「让自检永远是红的」不是一个选项：一条永远红的闸门和一条永远绿的一样没人看。
+#
+# ---------------------------------------------------------------------------
+# 只挂 workflow_dispatch
+# ---------------------------------------------------------------------------
+#
+# 它不会自己跑。selftest 通过 API 带上一个唯一的 marker 把它 dispatch 起来，
+# `run-name` 里印着那个 marker，所以父运行能准确找到自己触发的是哪一次,靠时间
+# 排序去猜「最近那次」，在并发下就是错的。
+#
+# dispatch 时可以指定 `ref`，跑的是**那个 ref 上的**这份文件和 report.yml，所以
+# 它验的仍然是当前这次改动，不是 main 上那份。
+
+name: selftest-degraded
+run-name: 降级用例（预期失败）${{ inputs.marker }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      marker:
+        description: 评论标记。父运行用它把这次运行和自己对上号。
+        required: true
+        type: string
+
+jobs:
+  # 和 selftest.yml 里那个一样。这次运行是独立的，artifact 不跨运行，
+  # 所以它得自己产一份,否则连日志尾巴都没有，第 3 条就无从验起。
+  fake-gate:
+    name: 假闸门
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 跑假闸门
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          node test/fake-gate.mjs 2>&1 | tee artifacts/stdout-fake.log
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-fake
+          path: artifacts/
+          retention-days: 3
+          if-no-files-found: error
+
+  # gates **故意全传 success**：这样这条 job 唯一可能变红的原因就是降级本身。
+  # 喂一个失败的闸门进去它也会红,而那种红什么都证明不了。
+  report:
+    name: 降级用例
+    needs: [fake-gate]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/report.yml
+    with:
+      node-version: '22'
+      gates: '[{"name":"假闸门","result":"success"}]'
+      composer-files: test/this-file-does-not-exist-on-purpose.mjs
+      composer-entry: test/this-file-does-not-exist-on-purpose.mjs
+      marker: ${{ inputs.marker }}

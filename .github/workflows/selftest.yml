@@ -10,25 +10,16 @@
 # 「发完读回来」，但那是监控自证清白,这里是从外面看，看的和读评论的人拿到的
 # 是同一份东西。
 #
-# ---------------------------------------------------------------------------
-# 三条用例
-# ---------------------------------------------------------------------------
-#
-# 1. 完整报告送达：评论查得到，带 composer 的哨兵（证明送出去的不是兜底那份）。
-# 2. 回写两次只留一条：同一个 marker 连发两遍，必须是更新，不是再贴一条。
-# 3. 降级：composer 取不到时，评论仍然送达、自称降级、带着闸门 stdout 的尾巴，
-#    并且让步骤真的变红。
-#
-# ---------------------------------------------------------------------------
-# 两个刻意的决定
-# ---------------------------------------------------------------------------
-#
 # **uses 的是本地路径 `./.github/workflows/report.yml`。** 自检必须验这次改动，
 # 不是验 @main 上那份,否则它永远在给已经发布的版本背书。
 #
-# **降级那条用例的 caller 是 continue-on-error。** 不这样的话这条自检永远是红的，
-# 而一条永远红的闸门和一条永远绿的一样没人看。代价是 `needs.*.result` 会被抹成
-# success，所以「它真的红了吗」改看**步骤**的结论,continue-on-error 影响不到那个。
+# ---------------------------------------------------------------------------
+# 降级那条用例不在这里
+# ---------------------------------------------------------------------------
+#
+# 它在 `selftest-degraded.yml`，因为那条用例**预期就是红的**,而调用可复用
+# workflow 的 job 不支持 `continue-on-error`（解析器会把它当成普通 job 然后报
+# runs-on 缺失）。一次预期失败的运行只能是它自己的一次运行。
 #
 # ---------------------------------------------------------------------------
 # 一个说清楚的局限
@@ -136,53 +127,3 @@ jobs:
           node test/verify-delivery.mjs \
             --marker '<!-- ci-workflows-selftest:ok:${{ github.run_id }}:${{ github.run_attempt }} -->' \
             --expect-one
-
-  # 用例 3：降级。composer 指向一个不存在的文件,取不到，合成不了，于是
-  # 只剩兜底评论。
-  #
-  # gates 这里**故意全传 success**：这样这条 job 唯一可能变红的原因就是降级
-  # 本身。喂一个失败的闸门进去，它也会红,而那种红什么都证明不了。
-  report-degraded:
-    name: 降级用例
-    needs: [fake-gate]
-    continue-on-error: true
-    permissions:
-      contents: write
-      pull-requests: write
-    uses: ./.github/workflows/report.yml
-    with:
-      node-version: '22'
-      gates: '[{"name":"假闸门","result":"success"}]'
-      composer-files: test/this-file-does-not-exist-on-purpose.mjs
-      composer-entry: test/this-file-does-not-exist-on-purpose.mjs
-      marker: '<!-- ci-workflows-selftest:degraded:${{ github.run_id }}:${{ github.run_attempt }} -->'
-
-  verify-degraded:
-    name: 验证降级会送达并且变红
-    needs: [report-degraded]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      # 三件事一起断言：评论送达了、它自称降级并带着 stdout 尾巴、以及那两个
-      # 步骤确实是 failure。少任何一条，这条用例都会退化成「降级时啥也没发生」
-      # 的同义反复。
-      - name: 回头确认降级评论存在且步骤确实红了
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          node test/verify-delivery.mjs \
-            --marker '<!-- ci-workflows-selftest:degraded:${{ github.run_id }}:${{ github.run_attempt }} -->' \
-            --degraded \
-            --expect-one \
-            --job '降级用例' \
-            --failed-steps '回写报告,闸门失败或报告降级则失败'
