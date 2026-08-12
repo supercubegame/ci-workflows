@@ -8,6 +8,10 @@
 # 的拷贝。「两份保持一致」只能靠人盯着,任何一个仓库的闸门都看不见另一个，同时
 # 改两边就是两边都绿而结构已经分叉。现在只有一份，一致性不再是需要守的东西。
 #
+# **这个文件自己有闸门**：`.github/workflows/selftest.yml`。改它之后不要只看
+# 「YAML 能解析」,自检会起一个假调用方跑完整条链路，然后回头去 API 上确认那条
+# 评论真的存在。
+#
 # ---------------------------------------------------------------------------
 # 这个 job 里每一条不寻常的设计，都是一次事故换来的
 # ---------------------------------------------------------------------------
@@ -28,6 +32,11 @@
 # 自己静默失败的监控，比没有监控更危险：你会以为一切正常，实际早就什么都读不到了。
 #
 # **接口收下了不等于有人读得到这条评论**，所以发完要读回来确认标记还在。
+#
+# **两条支路都要「找到就更新，找不到才新建」。** 这条是自检抓出来的：以前 PR 那条
+# 会按 marker 找到已有评论去更新，commit 那条直接新建，从来没找过,marker 的全部
+# 意义就是不刷屏，而它只实现了一半。生产里看不出来，因为每次推送都是新 SHA；同一个
+# SHA 上跑第二次就会留下两条。
 #
 # ---------------------------------------------------------------------------
 # 调用方约定
@@ -57,8 +66,7 @@
 # 加 `--check` 时不写文件，只用退出码表示成败。
 #
 # **两边都固定用 @main。** 换成 pin SHA 的话，A 仓库停在旧 SHA、B 仓库在新的，
-# 两边都绿而行为已经不同,版本漂移会把刚消灭的那个洞原样请回来。代价是这个文件
-# 一改就同时影响两个项目，而它自己没有闸门守着。改它之前先想清楚。
+# 两边都绿而行为已经不同,版本漂移会把刚消灭的那个洞原样请回来。
 
 name: 回写验证报告
 
@@ -233,6 +241,7 @@ jobs:
                 owner, repo, commit_sha: context.sha
               });
               const open = associated.data.find(pr => pr.state === 'open');
+
               if (open) {
                 const comments = await github.paginate(github.rest.issues.listComments, {
                   owner, repo, issue_number: open.number, per_page: 100
@@ -243,16 +252,25 @@ jobs:
                   : await github.rest.issues.createComment({ owner, repo, issue_number: open.number, body });
                 const readback = await github.rest.issues.getComment({ owner, repo, comment_id: result.data.id });
                 if (!readback.data.body.includes(marker)) throw new Error('PR 评论读回后没有标记');
-                return `PR #${open.number}（评论 ${result.data.id}）`;
+                return `PR #${open.number}（评论 ${result.data.id}，${existing ? '更新' : '新建'}）`;
               }
+
               // 没有 PR 的那条支路。直接 push 到主干时靠的就是它,而那正是没人
               // 盯着的时候。
-              const result = await github.rest.repos.createCommitComment({
-                owner, repo, commit_sha: context.sha, body
+              //
+              // 这里以前是直接 createCommitComment,自检抓到了：同一个 marker
+              // 发两遍会留下两条评论。两条支路必须对称，不然 marker 只在一半的
+              // 情况下起作用。
+              const commitComments = await github.paginate(github.rest.repos.listCommentsForCommit, {
+                owner, repo, commit_sha: context.sha, per_page: 100
               });
+              const mine = commitComments.find(c => c.body && c.body.includes(marker));
+              const result = mine
+                ? await github.rest.repos.updateCommitComment({ owner, repo, comment_id: mine.id, body })
+                : await github.rest.repos.createCommitComment({ owner, repo, commit_sha: context.sha, body });
               const readback = await github.rest.repos.getCommitComment({ owner, repo, comment_id: result.data.id });
               if (!readback.data.body.includes(marker)) throw new Error('commit 评论读回后没有标记');
-              return `commit ${context.sha.slice(0, 7)}（评论 ${result.data.id}）`;
+              return `commit ${context.sha.slice(0, 7)}（评论 ${result.data.id}，${mine ? '更新' : '新建'}）`;
             }
 
             let posted = null;
