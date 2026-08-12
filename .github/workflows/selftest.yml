@@ -14,12 +14,19 @@
 # 不是验 @main 上那份,否则它永远在给已经发布的版本背书。
 #
 # ---------------------------------------------------------------------------
-# 降级那条用例不在这里
+# 三条用例
 # ---------------------------------------------------------------------------
 #
-# 它在 `selftest-degraded.yml`，因为那条用例**预期就是红的**,而调用可复用
-# workflow 的 job 不支持 `continue-on-error`（解析器会把它当成普通 job 然后报
-# runs-on 缺失）。一次预期失败的运行只能是它自己的一次运行。
+# 1. 完整报告送达,评论查得到，带 composer 哨兵（证明送出去的不是兜底那份）
+# 2. 回写两次只留一条,同一个 marker 连发两遍，必须更新而不是刷屏
+# 3. 降级路径,评论仍然送达、自称降级、带日志尾巴，并且真的变红
+#
+# 第 2 条在写出来的当天就抓到一个真 bug：commit 那条支路只会新建、从不按
+# marker 找已有的那条。生产里看不出来，因为每次推送都是新 SHA。
+#
+# 第 3 条那次运行**预期就是红的**，所以它是独立的一次 dispatch（见
+# `selftest-degraded.yml`）：调用可复用 workflow 的 job 不支持
+# `continue-on-error`，解析器会把它当普通 job 然后报 runs-on 缺失。
 #
 # ---------------------------------------------------------------------------
 # 一个说清楚的局限
@@ -127,3 +134,31 @@ jobs:
           node test/verify-delivery.mjs \
             --marker '<!-- ci-workflows-selftest:ok:${{ github.run_id }}:${{ github.run_attempt }} -->' \
             --expect-one
+
+  # 用例 3：降级。
+  #
+  # 它不依赖上面那些 job,dispatch 出去的那次运行自带假闸门，是完全独立的
+  # 一次运行。所以这条和前两条并行跑。
+  #
+  # 需要 actions: write 才能 dispatch，actions: read 才能回头查它的结论和
+  # 步骤。
+  verify-degraded:
+    name: 验证降级会送达并且变红
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 触发降级用例，等它红，再验它红得对
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node test/verify-degraded.mjs \
+            '<!-- ci-workflows-selftest:degraded:${{ github.run_id }}:${{ github.run_attempt }} -->'
