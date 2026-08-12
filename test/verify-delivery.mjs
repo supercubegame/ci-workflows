@@ -15,7 +15,11 @@
  *
  * 用法：
  *   node test/verify-delivery.mjs --marker '<!-- x -->' [--degraded]
- *     [--expect-one] [--job '回报结果' --failed-steps '回写报告,闸门失败或报告降级则失败']
+ *     [--expect-one] [--run-id 123] [--job '回报结果']
+ *     [--failed-steps '回写报告,闸门失败或报告降级则失败']
+ *
+ * --run-id 用来查**另一次**运行的 job / step 结论（降级用例是独立 dispatch
+ * 出去的一次运行）。不给就查当前这次。
  * =========================================================================== */
 
 const args = process.argv.slice(2);
@@ -39,7 +43,7 @@ const COMPOSER_SENTINEL = 'COMPOSER-RAN-SENTINEL';
 const API = process.env.GITHUB_API_URL || 'https://api.github.com';
 const REPO = process.env.GITHUB_REPOSITORY;
 const SHA = process.env.GITHUB_SHA;
-const RUN_ID = process.env.GITHUB_RUN_ID;
+const RUN_ID = opt('run-id', process.env.GITHUB_RUN_ID);
 const TOKEN = process.env.GH_TOKEN;
 
 if (!MARKER) { console.error('缺 --marker'); process.exit(2); }
@@ -90,8 +94,11 @@ try {
   }
   // 同一个标记只该有一条评论。自检故意用同一个 marker 跑了两遍回写：
   // 第二遍必须是**更新**那一条，而不是再贴一条。刷屏也是一种坏掉。
+  //
+  // 这条在写出来的当天就抓到了一个真 bug：commit 那条支路只会新建，从不
+  // 按 marker 找已有的那条。
   if (EXPECT_ONE && hit.length > 1){
-    problems.push('带这个标记的评论有 ' + hit.length + ' 条，应该只有 1 条 - 第二次回写没有更新已有的那条，而是又贴了一条');
+    problems.push('带这个标记的评论有 ' + hit.length + ' 条，应该只有 1 条 - 回写没有更新已有的那条，而是又贴了一条');
   }
 
   const body = hit.length ? hit[0].body : '';
@@ -112,16 +119,14 @@ try {
     }
   }
 
-  // job / step 级别的断言。降级用例的 caller 是 continue-on-error（否则整条
-  // 自检永远是红的），而 continue-on-error 会把 job 的 result 抹成 success,
-  // 所以这里不看 job 的结论，看**步骤**的结论：它们不受 continue-on-error 影响。
+  // step 级别的断言。降级用例是独立 dispatch 的一次运行，用 --run-id 指过去。
   if (JOB_NAME && FAILED_STEPS.length){
     const data = await api('/repos/' + REPO + '/actions/runs/' + RUN_ID + '/jobs?per_page=100');
     const jobs = data.jobs || [];
     const job = jobs.find(j => j.name.includes(JOB_NAME));
     if (!job){
       // 非空断言：找不到 job 的话，下面每条「某步骤失败了吗」都会读成没失败。
-      problems.push('在这次运行里找不到名字包含「' + JOB_NAME + '」的 job，' +
+      problems.push('在运行 ' + RUN_ID + ' 里找不到名字包含「' + JOB_NAME + '」的 job，' +
                     '所以下面关于步骤的断言什么都证明不了 ｜ 实际有：' + jobs.map(j => j.name).join('、'));
     } else {
       const steps = job.steps || [];
