@@ -1,0 +1,298 @@
+# ============================================================================
+# 验证报告回写（可复用）
+# ============================================================================
+#
+# 一句话：把各条闸门的报告合成一条评论，写回 PR 或 commit,而且**保证写得出去**。
+#
+# 为什么单独抽出来：这段逻辑以前在 image-grabber 和 jumpwow 里各有一份逐字相同
+# 的拷贝。「两份保持一致」只能靠人盯着,任何一个仓库的闸门都看不见另一个，同时
+# 改两边就是两边都绿而结构已经分叉。现在只有一份，一致性不再是需要守的东西。
+#
+# ---------------------------------------------------------------------------
+# 这个 job 里每一条不寻常的设计，都是一次事故换来的
+# ---------------------------------------------------------------------------
+#
+# **这里故意没有 actions/checkout。** image-grabber 的 run #51：两条闸门全绿，
+# 而那次提交上一条评论都没有,报告 job 的 clone 死在 git 证书校验（exit 128），
+# 把整条回写一起带走了。从仓库外面看完全像是「跑过了」。这个 job 需要的是一两个
+# 脚本文件，不是一棵工作树，所以它用 contents API 取，带重试。
+#
+# **兜底评论在任何会失败的步骤之前就种下**，每次运行都走。这样「降级」那条支路是
+# 每一次都真的被执行过的，而不是一条从没走过、需要时才发现是坏的分支,image-grabber
+# 的「没 PR 就写 commit 评论」当初就是第一次被需要时才发现挂了。
+#
+# **降级的报告自己说明自己是降级的，并且让 job 变红。** 给不出的结果不能读起来像
+# 干净的一遍,和「跑到上限没确认到底」是同一个契约。
+#
+# **回写这一步不是 continue-on-error，永远不许改成 continue-on-error。** 一个允许
+# 自己静默失败的监控，比没有监控更危险：你会以为一切正常，实际早就什么都读不到了。
+#
+# **接口收下了不等于有人读得到这条评论**，所以发完要读回来确认标记还在。
+#
+# ---------------------------------------------------------------------------
+# 调用方约定
+# ---------------------------------------------------------------------------
+#
+#   report:
+#     name: 回报结果
+#     needs: [gate, web]
+#     if: always()
+#     permissions:
+#       contents: write         # commit 评论要它
+#       pull-requests: write    # PR 评论要它
+#     uses: supercubegame/ci-workflows/.github/workflows/report.yml@main
+#     with:
+#       node-version: '22'
+#       gates: '[{"name":"引擎闸门","result":"${{ needs.gate.result }}"}]'
+#       composer-files: scripts/compose-report.mjs
+#       composer-entry: scripts/compose-report.mjs
+#       marker: '<!-- verify-gate -->'
+#
+# 调用方还要满足两件事，否则这里拿不到东西：
+#   1. 每条闸门把报告上传成名字匹配 `report-*` 的 artifact。
+#   2. 每条闸门把 stdout tee 成 `stdout-<slug>.log` 一并上传,报告缺失时，评论里
+#      带的就是这份日志的尾巴。「没有产出报告」只说明监控坏了，不说明为什么。
+#
+# composer 的契约：`node <composer-entry> reports` 写出 comment.md；
+# 加 `--check` 时不写文件，只用退出码表示成败。
+#
+# **两边都固定用 @main。** 换成 pin SHA 的话，A 仓库停在旧 SHA、B 仓库在新的，
+# 两边都绿而行为已经不同,版本漂移会把刚消灭的那个洞原样请回来。代价是这个文件
+# 一改就同时影响两个项目，而它自己没有闸门守着。改它之前先想清楚。
+
+name: 回写验证报告
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: composer 用哪个 Node 跑
+        required: true
+        type: string
+      gates:
+        description: >-
+          闸门结果的 JSON 数组，形如 [{"name":"引擎闸门","result":"success"}]。
+          降级评论的表格和最终判定都从它算,所以 composer 没到位也判得出来。
+        required: true
+        type: string
+      composer-files:
+        description: 要取的脚本文件，空格分隔的仓库内路径
+        required: true
+        type: string
+      composer-entry:
+        description: 入口脚本，会以 `node <entry> reports` 调用
+        required: true
+        type: string
+      marker:
+        description: 埋在评论里的 HTML 注释标记，用来找到并更新同一条评论
+        required: true
+        type: string
+      esm-shim:
+        description: >-
+          可选。要写 {"type":"module"} 的 package.json 路径。没有 checkout 就没有
+          根 package.json，node 会把 .js 的 ESM 当 CommonJS 解析,用 .mjs 的项目
+          不需要这个。
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  report:
+    name: 回报结果
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: 下载闸门报告
+        id: download
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: reports
+          pattern: report-*
+
+      # 见文件头：这一步每次都跑，降级支路因此从不生锈。
+      - name: 种下兜底评论
+        id: seed
+        shell: bash
+        env:
+          GATES: ${{ inputs.gates }}
+        run: |
+          set -uo pipefail
+          touch report-degraded.flag
+          node -e '
+            const fs = require("fs");
+            const gates = JSON.parse(process.env.GATES);
+            const sha = String(process.env.GITHUB_SHA || "").slice(0, 7);
+            const run = process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY +
+                        "/actions/runs/" + process.env.GITHUB_RUN_ID;
+            const lines = [
+              "⚠️ **报告降级** — composer 没能加载，所以这条评论只有 job 级别的",
+              "结果，没有逐项证据。",
+              "",
+              "| 闸门 | job 结果 |",
+              "| --- | --- |",
+              ...gates.map(g => "| " + g.name + " | `" + g.result + "` |"),
+              "",
+              "提交 `" + sha + "` · [完整日志](" + run + ")",
+              ""
+            ];
+            fs.writeFileSync("comment.md", lines.join("\n"));
+          '
+          found=0
+          while IFS= read -r log; do
+            found=$((found + 1))
+            {
+              echo ""
+              echo "<details><summary>$(basename "$log") 末尾 80 行</summary>"
+              echo ""
+              echo '```'
+              tail -n 80 "$log"
+              echo '```'
+              echo ""
+              echo "</details>"
+            } >> comment.md
+          done < <(find reports -name 'stdout-*.log' 2>/dev/null | sort)
+          if [ "$found" -eq 0 ]; then
+            printf '\n连闸门的 stdout 日志都没下载到，说明这次在闸门产出任何东西之前就断了 - 去看 workflow，不是看闸门。\n' >> comment.md
+          fi
+
+      # 走 HTTPS 取那一两个文件，而不是整仓 clone，并且 pin 在被测的那个 commit 上，
+      # 保证 composer 和它正在汇报的代码是同一版。--retry-all-errors 覆盖的就是把
+      # run #51 干掉的那一类偶发网络错误。
+      - name: 取 composer
+        id: fetch
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FILES: ${{ inputs.composer-files }}
+          SHIM: ${{ inputs.esm-shim }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SHIM" ]; then
+            mkdir -p "$(dirname "$SHIM")"
+            echo '{ "type": "module" }' > "$SHIM"
+          fi
+          for f in $FILES; do
+            mkdir -p "$(dirname "$f")"
+            curl --fail --silent --show-error --location \
+                 --retry 5 --retry-delay 3 --retry-all-errors \
+                 --connect-timeout 10 --max-time 60 \
+                 -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github.raw" \
+                 -o "$f" \
+                 "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$f?ref=$GITHUB_SHA"
+            test -s "$f"
+          done
+
+      - name: 合成报告
+        id: compose
+        continue-on-error: true
+        shell: bash
+        env:
+          ENTRY: ${{ inputs.composer-entry }}
+        run: |
+          set -euo pipefail
+          node "$ENTRY" reports
+          test -s comment.md
+          rm -f report-degraded.flag
+
+      # 这一步**不是** continue-on-error，理由见文件头。
+      - name: 回写报告
+        id: post
+        uses: actions/github-script@v7
+        env:
+          MARKER: ${{ inputs.marker }}
+        with:
+          retries: 3
+          script: |
+            const fs = require('fs');
+            const marker = process.env.MARKER;
+            const degraded = fs.existsSync('report-degraded.flag');
+            const text = fs.readFileSync('comment.md', 'utf8');
+            const body = marker + '\n' + text;
+            const { owner, repo } = context.repo;
+
+            // 先写 job summary。就算下面每次尝试都失败，证据至少还留在 run
+            // 页面上，人能看到。
+            await core.summary.addRaw(text).write();
+
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+            async function postOnce() {
+              // 从 commit 反查 PR。不读 context.payload.pull_request：那要求调用方
+              // 挂在 pull_request 事件上，而挂上去 PR 里每次推送就会跑两遍闸门。
+              const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner, repo, commit_sha: context.sha
+              });
+              const open = associated.data.find(pr => pr.state === 'open');
+              if (open) {
+                const comments = await github.paginate(github.rest.issues.listComments, {
+                  owner, repo, issue_number: open.number, per_page: 100
+                });
+                const existing = comments.find(c => c.body && c.body.includes(marker));
+                const result = existing
+                  ? await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body })
+                  : await github.rest.issues.createComment({ owner, repo, issue_number: open.number, body });
+                const readback = await github.rest.issues.getComment({ owner, repo, comment_id: result.data.id });
+                if (!readback.data.body.includes(marker)) throw new Error('PR 评论读回后没有标记');
+                return `PR #${open.number}（评论 ${result.data.id}）`;
+              }
+              // 没有 PR 的那条支路。直接 push 到主干时靠的就是它,而那正是没人
+              // 盯着的时候。
+              const result = await github.rest.repos.createCommitComment({
+                owner, repo, commit_sha: context.sha, body
+              });
+              const readback = await github.rest.repos.getCommitComment({ owner, repo, comment_id: result.data.id });
+              if (!readback.data.body.includes(marker)) throw new Error('commit 评论读回后没有标记');
+              return `commit ${context.sha.slice(0, 7)}（评论 ${result.data.id}）`;
+            }
+
+            let posted = null;
+            let last = null;
+            for (let attempt = 1; attempt <= 4 && !posted; attempt += 1) {
+              try {
+                posted = await postOnce();
+              } catch (err) {
+                last = err;
+                core.warning(`第 ${attempt} 次回写失败：${err.message}`);
+                if (attempt < 4) await sleep(2000 * attempt);
+              }
+            }
+            if (!posted) throw new Error(`重试 4 次仍然没能把报告写回去：${last && last.message}`);
+            core.info(`报告已送达 ${posted}`);
+            if (degraded) core.setFailed('报告是以降级形式送出的：composer 没加载，评论里只有 job 结果，没有逐项证据');
+
+      # 判定从 job 结果算，所以 composer 没到位也照样成立。composer 在的时候再用
+      # --check 复核一遍。
+      - name: 闸门失败或报告降级则失败
+        id: verdict
+        if: always()
+        shell: bash
+        env:
+          GATES: ${{ inputs.gates }}
+          ENTRY: ${{ inputs.composer-entry }}
+        run: |
+          set -uo pipefail
+          rc=0
+          node -e '
+            const gates = JSON.parse(process.env.GATES);
+            const bad = gates.filter(g => g.result !== "success");
+            for (const g of bad) console.log(g.name + ": " + g.result);
+            process.exit(bad.length ? 1 : 0);
+          ' || rc=1
+          if [ -f report-degraded.flag ]; then
+            echo "composer 没能加载，送出去的评论里没有逐项证据"
+            rc=1
+          fi
+          if [ -f "$ENTRY" ]; then
+            node "$ENTRY" reports --check || rc=1
+          fi
+          exit $rc
