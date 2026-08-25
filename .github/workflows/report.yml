@@ -33,10 +33,34 @@
 #
 # **接口收下了不等于有人读得到这条评论**，所以发完要读回来确认标记还在。
 #
-# **两条支路都要「找到就更新，找不到才新建」。** 这条是自检抓出来的：以前 PR 那条
+# **两条支路都要「找到就更新，找不到才新建」。** 这条是自检抳出来的：以前 PR 那条
 # 会按 marker 找到已有评论去更新，commit 那条直接新建，从来没找过,marker 的全部
 # 意义就是不刷屏，而它只实现了一半。生产里看不出来，因为每次推送都是新 SHA；同一个
 # SHA 上跑第二次就会留下两条。
+#
+# ---------------------------------------------------------------------------
+# **2026-08-25：三个 action 离开 Node 20 运行时。**
+#
+# 消费者仓（clickup-brain-backup）那边每一条 run 都在打同一条弃用警告：
+# 这几个第一方 action 的老版本带的是 Node 20 运行时，而平台已经在强行把它们
+# 放到 Node 24 上跑。**此刻不是坏的，而是被代理着** —— 这正是时间驱动漂移
+# 最难看的形状：没人改一行代码，而到期那天它自己会断。
+#
+# **三个版本都是读发布说明定的，不是猜的：**
+#   - setup-node v5：运行在 node24。
+#   - download-artifact **v7**，不是 v6。v6 只是「预备支持」node24，默认仍然跑
+#     Node 20 —— 换到 v6 会让警告看起来消失而问题原样留着，那是典型的假绿。
+#     **也不用 v8**：那一版改成 ESM 并且把哈希不匹配从警告升成错误，那是两件
+#     真行为变更，和「换运行时」混在一推里红了就分不清是哪一半。
+#   - github-script v8：运行在 node24。
+#
+# **三个都要求 runner 至少 v2.327.1。** 托管 runner 已经远超这个版本，而自建
+# runner 得自己确认 —— 这句写在这里而不是只写在 PR 里，因为 PR 会被合掉，
+# 而下一个撞上它的人读的是这份文件。
+#
+# **`node-version` 那个输入没动。** 它是调用方给的 composer 工具链版本，
+# 和 action 自己的运行时是两回事。
+# ---------------------------------------------------------------------------
 #
 # ---------------------------------------------------------------------------
 # 调用方约定
@@ -113,13 +137,14 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.node-version }}
 
+      # v7，不是 v6：见文件头。v6 默认还跑 Node 20，换过去只会让警告消失。
       - name: 下载闸门报告
         id: download
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         continue-on-error: true
         with:
           path: reports
@@ -215,7 +240,7 @@ jobs:
       # 这一步**不是** continue-on-error，理由见文件头。
       - name: 回写报告
         id: post
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           MARKER: ${{ inputs.marker }}
         with:
