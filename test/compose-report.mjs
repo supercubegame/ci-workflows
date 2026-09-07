@@ -38,8 +38,12 @@ let data = null;
 try { data = file ? JSON.parse(fs.readFileSync(file, 'utf8')) : null; } catch (e) { data = null; }
 
 // 报告缺失算失败。这条和真 composer 一样,一个在写出报告之前就崩掉的 job
-// 绝不能看起来像通过。
-const failed = !data || data.passed !== data.total;
+// 绝不能看起来像通过。隔离反例结果必须非空且逐项计数一致。
+const policy = data && data.policy;
+const policyOK = policy && policy.suite === 'production-report-post' &&
+  Number.isInteger(policy.total) && policy.total > 0 && policy.passed === policy.total &&
+  Array.isArray(policy.names) && policy.names.length === policy.total && new Set(policy.names).size === policy.total;
+const failed = !data || data.passed !== data.total || !policyOK;
 
 if (checkOnly){
   process.stdout.write((failed ? 'FAILED' : 'PASSED') + '\n');
@@ -56,6 +60,9 @@ const body = [
   data
     ? '假闸门 ' + data.passed + '/' + data.total + ' 通过'
     : '没有找到假闸门的报告,这条评论本身就是失败的证据',
+  '',
+  policyOK ? '生产回写脚本隔离反例 ' + policy.passed + '/' + policy.total + ' 通过' : '生产回写脚本反例证据缺失或计数矛盾',
+  ...(policyOK ? ['<details><summary>检查明细</summary>', '', ...policy.names.map(n => '- ' + n), '', '</details>'] : []),
   '',
   '提交 `' + String(process.env.GITHUB_SHA || 'local').slice(0, 7) + '`',
   '',
