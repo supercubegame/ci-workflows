@@ -1,0 +1,83 @@
+name: job verdict acceptance
+# This run deliberately contains failed gate/report jobs. The observer must pass.
+on:
+  push:
+    paths:
+      - '.github/workflows/report.yml'
+      - '.github/workflows/selftest-job-verdict.yml'
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: job-verdict-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  failed-gate:
+    name: 绿色产物之后故意失败
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 先生成正常完整报告
+        run: |
+          set -euo pipefail
+          node test/fake-gate.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report-fake
+          path: artifacts/
+          if-no-files-found: error
+      - name: 模拟报告上传后自证失败
+        run: |
+          echo 'EXPECTED FAILURE after green artifact: never label the job passed'
+          exit 1
+  report:
+    name: 失败 job 的真实回写
+    needs: [failed-gate]
+    if: always()
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/report.yml
+    with:
+      node-version: '22'
+      gates: '[{"name":"包含后续自证的闸门","result":"${{ needs.failed-gate.result }}"}]'
+      composer-files: test/compose-report.mjs
+      composer-entry: test/compose-report.mjs
+      marker: '<!-- job-verdict-selftest:${{ github.run_id }}:${{ github.run_attempt }} -->'
+  observe:
+    name: 验证失败标题压过绿色产物
+    needs: [failed-gate, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          GATE_RESULT: ${{ needs.failed-gate.result }}
+          REPORT_RESULT: ${{ needs.report.result }}
+        with:
+          script: |
+            const assert = require('node:assert/strict');
+            assert.equal(process.env.GATE_RESULT, 'failure', 'negative gate must really fail');
+            assert.equal(process.env.REPORT_RESULT, 'failure', 'report job must preserve the failure');
+            const {owner,repo}=context.repo;
+            const prs=await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit,{owner,repo,commit_sha:context.sha,per_page:100});
+            const current=prs.filter(p=>p.state==='open' && p.head.sha===context.sha);
+            assert(current.length<=1,'ambiguous current PR');
+            const comments=current.length ? await github.paginate(github.rest.issues.listComments,{owner,repo,issue_number:current[0].number,per_page:100}) : await github.paginate(github.rest.repos.listCommentsForCommit,{owner,repo,commit_sha:context.sha,per_page:100});
+            const marker='<!-- job-verdict-selftest:'+context.runId+':'+process.env.GITHUB_RUN_ATTEMPT+' -->';
+            const hit=comments.filter(c=>c.user.id===41898282 && c.user.login==='github-actions[bot]' && c.body.split('\n')[0]===marker);
+            assert.equal(hit.length,1,'exact current owned report');
+            const body=hit[0].body;
+            assert(body.includes('<!-- ci-report-execution:'+owner+'/'+repo+':'+context.sha+':'+context.runId+':'+process.env.GITHUB_RUN_ATTEMPT+' -->'));
+            assert(body.split('\n')[2].startsWith('❌ 本轮所报闸门未通过'));
+            assert(body.includes('COMPOSER-RAN-SENTINEL') && body.includes('假闸门 2/2 通过'),'must contain the green artifact, not a fallback');
+            assert(body.indexOf('failure') < body.indexOf('COMPOSER-RAN-SENTINEL'));
+            core.info('PASS actual failed job + green artifact: failure heading first, exact run-bound comment, both jobs remain red. '+hit[0].html_url);
