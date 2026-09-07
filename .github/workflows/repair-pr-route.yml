@@ -1,0 +1,33 @@
+name: bounded PR route repair
+on:
+  push:
+    branches: ['fix/direct-pr-routing-20260907']
+    paths: ['repair_pr_route.py', '.github/workflows/repair-pr-route.yml']
+permissions: {}
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Reproduce then repair and test
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python3 repair_pr_route.py 2>&1 | tee artifacts/route-repair.log
+          git add .github/workflows/report.yml test/report-post.test.mjs
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: resolve PR event reports by fresh PR number rather than merge association'
+          git push origin HEAD:fix/direct-pr-routing-20260907
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: route-repair
+          path: artifacts/
