@@ -283,11 +283,13 @@ jobs:
             const sleep = ms => new Promise(r => setTimeout(r, ms));
 
             async function postOnce() {
-              // 仍按当前提交反查 PR；旧提交关联及歧义不能取得当前 PR 评论的所有权。
+              // PR 事件的执行 SHA 可以是合并提交；目标按事件头提交，正文仍记录执行 SHA。
+              const eventPR = context.payload && context.payload.pull_request;
+              const targetHead = eventPR ? eventPR.head.sha : context.sha;
               const associated = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
                 owner, repo, commit_sha: context.sha, per_page: 100
               });
-              const candidates = associated.filter(pr => pr.state === 'open' && pr.head && pr.head.sha === context.sha && pr.base && pr.base.repo && pr.base.repo.full_name === repository);
+              const candidates = associated.filter(pr => pr.state === 'open' && pr.head && pr.head.sha === targetHead && (!eventPR || pr.number === eventPR.number) && pr.base && pr.base.repo && pr.base.repo.full_name === repository);
               if (candidates.length > 1) reject('ambiguous current PR targets: ' + candidates.length);
               const open = candidates[0];
 
