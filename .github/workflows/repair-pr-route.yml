@@ -10,6 +10,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -26,6 +27,14 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix: resolve PR event reports by fresh PR number rather than merge association'
           git push origin HEAD:fix/direct-pr-routing-20260907
+      - name: Deliver repair diagnostic
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          { echo 'Bounded repair diagnostic'; echo "run $GITHUB_RUN_ID commit $GITHUB_SHA"; echo '```'; tail -c 12000 artifacts/route-repair.log; echo '```'; } > /tmp/diagnostic.md
+          gh pr comment 6 --repo supercubegame/ci-workflows --body-file /tmp/diagnostic.md
       - uses: actions/upload-artifact@v6
         if: always()
         with:
