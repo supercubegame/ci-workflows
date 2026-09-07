@@ -1,26 +1,14 @@
 #!/usr/bin/env node
-/* ===========================================================================
- * 假闸门
- * ===========================================================================
- *
- * 它的输入仍是合成数据；先执行真实回写脚本的隔离反例，再产出同形 artifact。
- * 这些反例验证选择/写入/读回行为，不冒充真实 GitHub API 送达测试。
- *
- *   artifacts/report-fake.json   composer 要读的报告
- *   artifacts/stdout-fake.log    stdout 的副本
- *
- * 那份 stdout 日志不是摆设。composer 加载失败时，降级评论里要能找到哨兵。
- * =========================================================================== */
+// stdout-fake.log belongs exclusively to the workflow tee process.
+// Direct invocation writes JSON and stdout, not a second competing log file.
 import fs from 'node:fs';
 import path from 'node:path';
 import { policySummary } from './report-post.test.mjs';
+import './log-writer.test.mjs';
 
 const ART = path.resolve('artifacts');
 fs.mkdirSync(ART, { recursive: true });
-
-// 降级评论里要能找到这一行。改它就要同步改 test/verify-delivery.mjs。
 const SENTINEL = 'FAKE-GATE-STDOUT-SENTINEL';
-
 const lines = [
   '假闸门开始',
   SENTINEL + ' 这一行必须出现在降级评论的日志尾巴里',
@@ -29,18 +17,9 @@ const lines = [
   'Production report script checks: ' + policySummary.passed + '/' + policySummary.total,
   '假闸门结束：2/2 通过',
 ];
-
 for (const line of lines) console.log(line);
-fs.writeFileSync(path.join(ART, 'stdout-fake.log'), lines.join('\n') + '\n');
-
 fs.writeFileSync(path.join(ART, 'report-fake.json'), JSON.stringify({
-  name: '假闸门',
-  passed: 2,
-  total: 2,
-  ok: true,
-  sentinel: SENTINEL,
-  policy: policySummary,
-  ranAt: new Date().toISOString(),
+  name: '假闸门', passed: 2, total: 2, ok: true, sentinel: SENTINEL,
+  policy: policySummary, ranAt: new Date().toISOString(),
 }, null, 2));
-
 process.exit(0);

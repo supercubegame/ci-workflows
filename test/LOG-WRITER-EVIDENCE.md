@@ -1,0 +1,5 @@
+# Single-writer regression, 2026-09-07
+
+The workflow tee process is the only owner of artifacts/stdout-fake.log. fake-gate.mjs writes JSON and stdout, not a competing stdout log. The permanent regression executes the real producer body in three actual bash/tee subprocesses (test imports replaced to avoid recursion), compares stdout and file bytes, requires one instance of each producer sentinel, and rejects NUL/duplicate controls. Restoring the old direct file-write statement is a mutant that reproduces a second writer. This proves the tested fixture behavior, not every possible filesystem race.
+
+The original 43 production report-routing cases remain unchanged. Normal workflow full/repeated delivery and deliberately degraded delivery must still be verified through actual comments and external observer jobs. A degraded job is expected red; its delivery observer must be green. No report.yml behavior changed, so vendor copies require no update. No remote test branch data or cleanup is part of this fix.
