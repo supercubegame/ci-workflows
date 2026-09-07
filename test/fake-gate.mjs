@@ -3,18 +3,17 @@
  * 假闸门
  * ===========================================================================
  *
- * 它不验证任何东西,它的工作是**产出和真调用方形状完全一致的东西**，好让
- * report.yml 有真实的输入可以处理：
+ * 它的输入仍是合成数据；先执行真实回写脚本的隔离反例，再产出同形 artifact。
+ * 这些反例验证选择/写入/读回行为，不冒充真实 GitHub API 送达测试。
  *
  *   artifacts/report-fake.json   composer 要读的报告
  *   artifacts/stdout-fake.log    stdout 的副本
  *
- * 那份 stdout 日志不是摆设。composer 加载失败时，降级评论里带的就是它的
- * 尾巴,自检的降级用例会去评论里找这行哨兵，以此证明「报告缺失时仍然带着
- * 证据」这条真的成立，而不只是代码里写了。
+ * 那份 stdout 日志不是摆设。composer 加载失败时，降级评论里要能找到哨兵。
  * =========================================================================== */
 import fs from 'node:fs';
 import path from 'node:path';
+import { policySummary } from './report-post.test.mjs';
 
 const ART = path.resolve('artifacts');
 fs.mkdirSync(ART, { recursive: true });
@@ -27,6 +26,7 @@ const lines = [
   SENTINEL + ' 这一行必须出现在降级评论的日志尾巴里',
   'PASS  假检查 1',
   'PASS  假检查 2',
+  'Production report script checks: ' + policySummary.passed + '/' + policySummary.total,
   '假闸门结束：2/2 通过',
 ];
 
@@ -39,6 +39,7 @@ fs.writeFileSync(path.join(ART, 'report-fake.json'), JSON.stringify({
   total: 2,
   ok: true,
   sentinel: SENTINEL,
+  policy: policySummary,
   ranAt: new Date().toISOString(),
 }, null, 2));
 
