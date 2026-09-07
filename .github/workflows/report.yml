@@ -239,6 +239,51 @@ jobs:
           test -s comment.md
           rm -f report-degraded.flag
 
+      - name: 让整轮 job 状态先于产物结论
+        id: job-verdict
+        shell: bash
+        env:
+          GATES: ${{ inputs.gates }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs'), assert = require('node:assert/strict');
+          function verdict(raw, degraded) {
+            let gates;
+            try { gates = JSON.parse(raw); } catch { return {ok:false,title:'❌ 本轮 job 结果不可解析',detail:'不能用产物报告代替 job 状态。'}; }
+            if (!Array.isArray(gates) || !gates.length || !gates.every(g => g && typeof g.name === 'string' && g.name.trim().length && ['success','failure','cancelled','skipped'].includes(g.result)) || new Set(gates.map(g=>g.name)).size !== gates.length) {
+              return {ok:false,title:'❌ 本轮 job 结果不完整或矛盾',detail:'需要非空、唯一名称及明确状态。'};
+            }
+            const bad = gates.filter(g=>g.result!=='success');
+            const title = bad.length ? '❌ 本轮所报闸门未通过' : degraded ? '⚠️ 本轮报告降级，验收未完成' : '所报 job 均成功；产物检查结论见下';
+            const detail = gates.map(g=>JSON.stringify(g.name)+': '+g.result).join(' | ');
+            return {ok:!bad.length && !degraded,title,detail};
+          }
+          const good = JSON.stringify([{name:'gate',result:'success'}]);
+          const cases = [
+            [good,false,true], [good,true,false],
+            [JSON.stringify([{name:'gate',result:'failure'}]),false,false],
+            [JSON.stringify([{name:'gate',result:'cancelled'}]),false,false],
+            [JSON.stringify([{name:'gate',result:'skipped'}]),false,false],
+            ['[]',false,false], ['{}',false,false], ['bad-json',false,false],
+            [JSON.stringify([{name:'gate',result:true}]),false,false],
+            [JSON.stringify([{name:'gate',result:'success'},{name:'gate',result:'success'}]),false,false]
+          ];
+          for (const [raw,d,w] of cases) assert.equal(verdict(raw,d).ok,w);
+          const failed = verdict(JSON.stringify([{name:'backup including selfproof',result:'failure'}]),false);
+          const misleading = '✅ 产物检查通过 15/15';
+          const fixture = failed.title+'\n'+failed.detail+'\n产物明细（不能覆盖上面的 job 结论）\n'+misleading;
+          assert(fixture.startsWith('❌ 本轮所报闸门未通过'));
+          assert(fixture.indexOf('failure') < fixture.indexOf(misleading));
+          const v = verdict(process.env.GATES,fs.existsSync('report-degraded.flag'));
+          const text = fs.readFileSync('comment.md','utf8');
+          const header = [v.title,'',v.detail,'','标题状态自证 '+cases.length+'/'+cases.length+'；失败 job + 绿色产物顺序反例通过。',
+            '','以下是产物明细，仅代表产物中的检查；不能覆盖上面的 job 结论，也不证明未上报的 job 已通过。',''];
+          fs.writeFileSync('comment.md',header.join('\n')+'\n'+text);
+          if (!v.ok) fs.writeFileSync('report-job-verdict.failed','job verdict not successful\n');
+          console.log(header.join('\n'));
+          NODE
+
       # 这一步**不是** continue-on-error，理由见文件头。
       - name: 回写报告
         id: post
@@ -356,6 +401,10 @@ jobs:
             for (const g of bad) console.log(g.name + ": " + g.result);
             process.exit(bad.length ? 1 : 0);
           ' || rc=1
+          if [ -f report-job-verdict.failed ]; then
+            echo "上报的 job 状态不完整、未成功，或报告降级"
+            rc=1
+          fi
           if [ -f report-degraded.flag ]; then
             echo "composer 没能加载，送出去的评论里没有逐项证据"
             rc=1
