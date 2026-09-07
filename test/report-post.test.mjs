@@ -23,6 +23,7 @@ const old = (kind, patch = {}) => ({id: 7, user: {...BOT}, body: MARKER + '\nold
 
 async function scenario(options = {}) {
   const kind = options.kind || 'commit';
+  const executionSha = options.executionSha || SHA;
   const comments = structuredClone(options.comments || []);
   const writes = [], infos = [], failures = [];
   let caught = null;
@@ -33,8 +34,9 @@ async function scenario(options = {}) {
   const create = destination => async args => {
     assert.equal(destination, kind, 'write went to the wrong destination');
     if (kind === 'pr') assert.equal(args.issue_number, 9);
-    else assert.equal(args.commit_sha, SHA);
-    const value = old(kind, {id: 100 + writes.length, body: args.body});
+    else assert.equal(args.commit_sha, executionSha);
+    const value = old(kind, {id: 100 + writes.length, body: args.body,
+      ...(kind === 'commit' ? {commit_id: executionSha} : {})});
     comments.push(value); writes.push({operation: 'create', ...args});
     return {data: value};
   };
@@ -66,7 +68,8 @@ async function scenario(options = {}) {
     }};
   };
   try {
-    await execute(require, {repo:{owner:'owner',repo:'repo'},sha:SHA,runId:123}, github, core, {env}, fn => fn());
+    await execute(require, {repo:{owner:'owner',repo:'repo'},sha:executionSha,runId:123,
+      payload: options.eventPR ? {pull_request:options.eventPR} : {}}, github, core, {env}, fn => fn());
   } catch (error) { caught = error; }
   return {caught, writes, comments, infos, failures};
 }
@@ -121,6 +124,20 @@ await test('older associated PR does not own current commit', async () => {
 });
 await test('closed PR falls back to commit', async () => {
   const r = await scenario({associated:[{...PR,state:'closed'}]});
+  assert.equal(r.caught, null); assert.equal(r.writes.length, 1);
+});
+await test('PR event merge SHA still delivers to its current PR', async () => {
+  const mergeSha = 'b'.repeat(40);
+  const r = await scenario({kind:'pr',executionSha:mergeSha,eventPR:PR});
+  assert.equal(r.caught, null); assert.equal(r.writes.length, 1);
+  assert(r.writes[0].body.includes('ci-report-execution:owner/repo:'+mergeSha+':123:2'));
+});
+await test('stale PR event cannot overwrite newer PR head', async () => {
+  const r = await scenario({executionSha:'b'.repeat(40),eventPR:PR,associated:[{...PR,head:{sha:'c'.repeat(40)}}]});
+  assert.equal(r.caught, null); assert.equal(r.writes.length, 1);
+});
+await test('PR event cannot select another PR with same head', async () => {
+  const r = await scenario({executionSha:'b'.repeat(40),eventPR:PR,associated:[{...PR,number:10}]});
   assert.equal(r.caught, null); assert.equal(r.writes.length, 1);
 });
 await test('degraded report is delivered and fails explicitly', async () => {
