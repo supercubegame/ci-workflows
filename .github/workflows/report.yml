@@ -330,13 +330,28 @@ jobs:
             async function postOnce() {
               // PR 事件的执行 SHA 可以是合并提交；目标按事件头提交，正文仍记录执行 SHA。
               const eventPR = context.payload && context.payload.pull_request;
-              const targetHead = eventPR ? eventPR.head.sha : context.sha;
-              const associated = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
-                owner, repo, commit_sha: context.sha, per_page: 100
-              });
-              const candidates = associated.filter(pr => pr.state === 'open' && pr.head && pr.head.sha === targetHead && (!eventPR || pr.number === eventPR.number) && pr.base && pr.base.repo && pr.base.repo.full_name === repository);
-              if (candidates.length > 1) reject('ambiguous current PR targets: ' + candidates.length);
-              const open = candidates[0];
+              let open;
+              // Direct event PR lookup: merge-commit association is not authoritative.
+              if (eventPR) {
+                if (!Number.isSafeInteger(eventPR.number) || eventPR.number < 1 ||
+                    !/^[0-9a-f]{40}$/.test(eventPR.head && eventPR.head.sha || '') ||
+                    !eventPR.base || !eventPR.base.repo || eventPR.base.repo.full_name !== repository) {
+                  reject('invalid PR event target');
+                }
+                const { data: current } = await github.rest.pulls.get({owner, repo, pull_number:eventPR.number});
+                if (!current || current.number !== eventPR.number || !current.base || !current.base.repo ||
+                    current.base.repo.full_name !== repository || !['open','closed'].includes(current.state) ||
+                    !/^[0-9a-f]{40}$/.test(current.head && current.head.sha || '')) reject('invalid current PR target');
+                if (current.state === 'open' && current.head.sha === eventPR.head.sha) open = current;
+                else core.info('PR target no longer current; using execution commit (closed or head changed)');
+              } else {
+                const associated = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+                  owner, repo, commit_sha: context.sha, per_page: 100
+                });
+                const candidates = associated.filter(pr => pr.state === 'open' && pr.head && pr.head.sha === context.sha && pr.base && pr.base.repo && pr.base.repo.full_name === repository);
+                if (candidates.length > 1) reject('ambiguous current PR targets: ' + candidates.length);
+                open = candidates[0];
+              }
 
               if (open) {
                 const target = c => c.issue_url === repoApi + '/issues/' + open.number;

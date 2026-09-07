@@ -53,6 +53,11 @@ async function scenario(options = {}) {
     return {data: {...item, ...(options.readback || {})}};
   };
   const github = {rest: {
+    pulls: {get: async args => {
+      assert.equal(args.pull_number, options.eventPR.number);
+      if(options.getError) throw new Error(options.getError);
+      return {data: options.currentPR || associated.find(p => p.number===options.eventPR.number) || options.eventPR};
+    }},
     repos: {listPullRequestsAssociatedWithCommit: listPR, listCommentsForCommit: listCommit,
       createCommitComment: create('commit'), updateCommitComment: update('commit'), getCommitComment: get},
     issues: {listComments: listIssue, createComment: create('pr'), updateComment: update('pr'), getComment: get},
@@ -137,7 +142,7 @@ await test('stale PR event cannot overwrite newer PR head', async () => {
   assert.equal(r.caught, null); assert.equal(r.writes.length, 1);
 });
 await test('PR event cannot select another PR with same head', async () => {
-  const r = await scenario({executionSha:'b'.repeat(40),eventPR:PR,associated:[{...PR,number:10}]});
+  const r = await scenario({kind:'pr',executionSha:'b'.repeat(40),eventPR:PR,associated:[{...PR,number:10}]});
   assert.equal(r.caught, null); assert.equal(r.writes.length, 1);
 });
 await test('degraded report is delivered and fails explicitly', async () => {
@@ -149,6 +154,31 @@ for (const [label, env] of [
   ['missing attempt',{GITHUB_RUN_ATTEMPT:''}], ['invalid attempt',{GITHUB_RUN_ATTEMPT:'02'}],
 ]) await test('invalid input: ' + label, async () => {
   const r = await scenario({env}); assert(r.caught, 'invalid input accepted'); assert.equal(r.writes.length, 0);
+});
+await test('PR event with empty merge association still reaches current PR', async () => {
+  const r = await scenario({kind:'pr',executionSha:'b'.repeat(40),eventPR:PR,associated:[]});
+  assert.equal(r.caught, null); assert.equal(r.writes.length, 1);
+});
+await test('direct PR read error cannot silently fall back', async () => {
+  const r=await scenario({kind:'pr',eventPR:PR,associated:[],getError:'403 denied'});
+  assert.match(r.caught?.message||'',/403/);assert.equal(r.writes.length,0);
+});
+for(const [label,currentPR] of [
+ ['wrong repository',{...PR,base:{repo:{full_name:'other/repo'}}}],
+ ['wrong number',{...PR,number:10}],
+ ['invalid state',{...PR,state:'unknown'}],
+ ['missing head',{...PR,head:{}}]
+]) await test('direct PR rejects '+label,async()=>{
+ const r=await scenario({kind:'pr',eventPR:PR,currentPR});
+ assert.match(r.caught?.message||'',/invalid current PR/);assert.equal(r.writes.length,0);
+});
+await test('direct PR read sees closure and uses execution commit',async()=>{
+ const r=await scenario({executionSha:'b'.repeat(40),eventPR:PR,currentPR:{...PR,state:'closed'},associated:[]});
+ assert.equal(r.caught,null);assert.equal(r.writes.length,1);
+});
+await test('invalid event repository is refused before writing',async()=>{
+ const r=await scenario({eventPR:{...PR,base:{repo:{full_name:'other/repo'}}}});
+ assert.match(r.caught?.message||'',/invalid PR event/);assert.equal(r.writes.length,0);
 });
 export const policySummary = {suite:'production-report-post',passed:total,total,names};
 console.log('Production report script checks: ' + total + '/' + total);
